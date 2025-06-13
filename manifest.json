@@ -6,7 +6,11 @@
   "permissions": [
     "tabs",
     "notifications",
-    "storage"
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://web-production-d7d37.up.railway.app/*"
   ],
   "background": {
     "service_worker": "background.js",
