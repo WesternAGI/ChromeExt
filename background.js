@@ -39,6 +39,23 @@ function sendHeartbeat(details = {}) {
   });
 }
 
+// Send heartbeat including active tab info
+function heartbeatWithActiveTab() {
+  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+    if (chrome.runtime.lastError) {
+      log(LEVELS.ERROR, 'BG', 'tabs.query error', chrome.runtime.lastError);
+      sendHeartbeat({ current_app: 'chrome' });
+      return;
+    }
+    const tab = tabs[0];
+    if (tab) {
+      sendHeartbeat({ current_app: 'chrome', current_page: tab.title, current_url: tab.url });
+    } else {
+      sendHeartbeat({ current_app: 'chrome' });
+    }
+  });
+}
+
 // Notify backend on logout
 function sendLogout() {
   getAuthToken((token) => {
@@ -55,8 +72,8 @@ function sendLogout() {
 }
 
 function scheduleHeartbeat() {
-  // Fire every 4 minutes
-  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 4 });
+  // Fire every 1 minute
+  chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
 }
 
 function clearHeartbeat() {
@@ -75,7 +92,7 @@ chrome.storage.local.get([AUTH_TOKEN_KEY], (result) => {
 chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === 'login-success') {
     isAuthenticated = true;
-    sendHeartbeat();
+    heartbeatWithActiveTab();
     scheduleHeartbeat();
     log(LEVELS.INFO, 'BG', 'Login success – tracking enabled');
   } else if (message?.type === 'logout') {
@@ -173,6 +190,6 @@ chrome.runtime.onInstalled.addListener(() => {
 // Alarm handler for periodic heartbeat
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEARTBEAT_ALARM) {
-    sendHeartbeat({ current_app: 'chrome' });
+    heartbeatWithActiveTab();
   }
 });
