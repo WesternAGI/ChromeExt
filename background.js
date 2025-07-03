@@ -6,6 +6,8 @@ const API_BASE = 'https://web-production-d7d37.up.railway.app';
 const DEVICE_NAME = 'browser-chrome';
 const DEVICE_TYPE = 'browser';
 const HEARTBEAT_ALARM = 'deviceHeartbeat';
+const HEARTBEAT_INTERVAL_MS = 1000; // 1 second heartbeat when service worker is awake
+let heartbeatIntervalId = null; // stores setInterval id
 
 // Authentication state
 const AUTH_TOKEN_KEY = 'authToken';
@@ -39,20 +41,32 @@ function sendHeartbeat(details = {}) {
   });
 }
 
-// Send heartbeat including active tab info
+// Send heartbeat including active tab info plus aggregated browser details
 function heartbeatWithActiveTab() {
-  chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-    if (chrome.runtime.lastError) {
-      log(LEVELS.ERROR, 'BG', 'tabs.query error', chrome.runtime.lastError);
+  // Get the current window with all tabs populated so we can compute metrics
+  chrome.windows.getCurrent({ populate: true }, (window) => {
+    if (chrome.runtime.lastError || !window) {
+      log(LEVELS.ERROR, 'BG', 'windows.getCurrent error', chrome.runtime.lastError);
       sendHeartbeat({ current_app: 'chrome' });
       return;
     }
-    const tab = tabs[0];
-    if (tab) {
-      sendHeartbeat({ current_app: 'chrome', current_page: tab.title, current_url: tab.url });
-    } else {
-      sendHeartbeat({ current_app: 'chrome' });
+
+    const tabs = window.tabs || [];
+    const tabCount = tabs.length;
+    const titles = tabs.map((t) => t.title).filter(Boolean);
+    const activeTab = tabs.find((t) => t.active) || tabs[0];
+
+    // Compose current_app string with extended info
+    const titlesStr = titles.join(' | ');
+    const current_app = `chrome|tabs:${tabCount}|titles:${titlesStr}`;
+
+    const details = { current_app };
+    if (activeTab) {
+      details.current_page = activeTab.title;
+      details.current_url = activeTab.url;
     }
+
+    sendHeartbeat(details);
   });
 }
 
@@ -72,12 +86,23 @@ function sendLogout() {
 }
 
 function scheduleHeartbeat() {
-  // Fire every 1 minute
+  // Fallback alarm to wake the service worker at least once per minute
   chrome.alarms.create(HEARTBEAT_ALARM, { periodInMinutes: 1 });
+
+  // Additionally, maintain an in-memory 1-second interval while the
+  // service-worker is alive. Note: the interval is cleared when the worker is
+  // suspended by Chrome, but will resume on the next alarm wake-up.
+  if (heartbeatIntervalId === null) {
+    heartbeatIntervalId = setInterval(heartbeatWithActiveTab, HEARTBEAT_INTERVAL_MS);
+  }
 }
 
 function clearHeartbeat() {
   chrome.alarms.clear(HEARTBEAT_ALARM);
+  if (heartbeatIntervalId !== null) {
+    clearInterval(heartbeatIntervalId);
+    heartbeatIntervalId = null;
+  }
 }
 
 // Retrieve token on startup
