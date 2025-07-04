@@ -26,8 +26,8 @@ async function getOrCreateDeviceId() {
       if (result[DEVICE_ID_KEY]) {
         resolve(result[DEVICE_ID_KEY]);
       } else {
-        // Generate a new device ID using Chrome's storage API ID and a random suffix
-        const newDeviceId = `chrome-${crypto.randomUUID()}`;
+        // Generate a new device ID as a plain UUID
+        const newDeviceId = crypto.randomUUID();
         chrome.storage.local.set({ [DEVICE_ID_KEY]: newDeviceId }, () => {
           log(LEVELS.INFO, 'BG', 'Generated new device ID', { deviceId: newDeviceId });
           resolve(newDeviceId);
