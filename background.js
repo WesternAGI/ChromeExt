@@ -7,6 +7,7 @@ const DEVICE_NAME = 'browser-chrome';
 const DEVICE_TYPE = 'browser';
 const HEARTBEAT_ALARM = 'deviceHeartbeat';
 const HEARTBEAT_INTERVAL_MS = 1000; // 1 second heartbeat when service worker is awake
+const DEVICE_ID_KEY = 'device_id';
 let heartbeatIntervalId = null; // stores setInterval id
 
 // Authentication state
@@ -18,36 +19,76 @@ function getAuthToken(cb) {
   chrome.storage.local.get([AUTH_TOKEN_KEY], (result) => cb(result[AUTH_TOKEN_KEY]));
 }
 
+// Generate a stable device ID if it doesn't exist
+async function getOrCreateDeviceId() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([DEVICE_ID_KEY], (result) => {
+      if (result[DEVICE_ID_KEY]) {
+        resolve(result[DEVICE_ID_KEY]);
+      } else {
+        // Generate a new device ID using Chrome's storage API ID and a random suffix
+        const newDeviceId = `chrome-${crypto.randomUUID()}`;
+        chrome.storage.local.set({ [DEVICE_ID_KEY]: newDeviceId }, () => {
+          log(LEVELS.INFO, 'BG', 'Generated new device ID', { deviceId: newDeviceId });
+          resolve(newDeviceId);
+        });
+      }
+    });
+  });
+}
+
 // Send heartbeat to backend
-function sendHeartbeat(details = {}) {
+async function sendHeartbeat(details = {}) {
   if (!isAuthenticated) return;
-  getAuthToken((token) => {
+  
+  try {
+    const token = await new Promise(resolve => getAuthToken(resolve));
     if (!token) return;
 
+    // Get or create device ID
+    const deviceId = await getOrCreateDeviceId();
+    
     const body = new URLSearchParams();
+    body.append('device_id', deviceId);
     body.append('device_name', DEVICE_NAME);
     body.append('device_type', DEVICE_TYPE);
     if (details.current_app) body.append('current_app', details.current_app);
     if (details.current_page) body.append('current_page', details.current_page);
     if (details.current_url) body.append('current_url', details.current_url);
 
-    fetch(`${API_BASE}/device/heartbeat`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-      body,
-    }).catch((err) => log(LEVELS.ERROR, 'BG', 'Heartbeat error', err));
-  });
+    try {
+      const response = await fetch(`${API_BASE}/device/heartbeat`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'Authorization': `Bearer ${token}`,
+        },
+        body,
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      
+      return await response.json();
+    } catch (err) {
+      log(LEVELS.ERROR, 'BG', 'Heartbeat error', err);
+      throw err; // Re-throw to allow caller to handle if needed
+    }
+  } catch (err) {
+    log(LEVELS.ERROR, 'BG', 'Error in sendHeartbeat', err);
+  }
 }
 
 // Send heartbeat including active tab info plus aggregated browser details
 function heartbeatWithActiveTab() {
   // Get the current window with all tabs populated so we can compute metrics
-  chrome.windows.getCurrent({ populate: true }, (window) => {
+  chrome.windows.getCurrent({ populate: true }, async (window) => {
     if (chrome.runtime.lastError || !window) {
       log(LEVELS.ERROR, 'BG', 'windows.getCurrent error', chrome.runtime.lastError);
-      sendHeartbeat({ current_app: 'chrome' });
+      await sendHeartbeat({ current_app: 'chrome' }).catch(err => {
+        log(LEVELS.ERROR, 'BG', 'Failed to send heartbeat', err);
+      });
       return;
     }
 
@@ -66,7 +107,11 @@ function heartbeatWithActiveTab() {
       details.current_url = activeTab.url;
     }
 
-    sendHeartbeat(details);
+    try {
+      await sendHeartbeat(details);
+    } catch (err) {
+      log(LEVELS.ERROR, 'BG', 'Failed to send heartbeat', err);
+    }
   });
 }
 
@@ -105,12 +150,25 @@ function clearHeartbeat() {
   }
 }
 
+// Initialize extension
+chrome.runtime.onInstalled.addListener(() => {
+  // Generate device ID on installation
+  getOrCreateDeviceId().then(deviceId => {
+    log(LEVELS.INFO, 'BG', 'Extension installed', { deviceId });
+  });
+});
+
 // Retrieve token on startup
 chrome.storage.local.get([AUTH_TOKEN_KEY], (result) => {
   if (result[AUTH_TOKEN_KEY]) {
     isAuthenticated = true;
     log(LEVELS.INFO, 'BG', 'Authenticated session detected on startup');
   }
+  
+  // Log the device ID on startup for debugging
+  getOrCreateDeviceId().then(deviceId => {
+    log(LEVELS.INFO, 'BG', 'Extension started', { deviceId });
+  });
 });
 
 // Listen for login/logout events from popup
