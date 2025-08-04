@@ -27,27 +27,41 @@ function time() {
  * Generic log function that respects log level.
  * @param {number} level
  * @param {string} tag - Log tag e.g. "BG", "CONTENT"
- * @param {...any} args - Arguments to log
+ * @param {...any} args - Arguments to log (Error stacks and objects are formatted)
  */
 function log(level, tag, ...args) {
   if (level < currentLevel) return;
 
   const prefix = `[${time()}] [${tag}]`;
+  // Format arguments: print Error stacks and JSON.stringify objects for clarity
+  const formattedArgs = args.map(arg => {
+    if (arg instanceof Error) {
+      return arg.stack || arg.toString();
+    }
+    if (arg !== null && typeof arg === 'object') {
+      try {
+        return JSON.stringify(arg, null, 2);
+      } catch (_) {
+        return String(arg);
+      }
+    }
+    return arg;
+  });
   switch (level) {
     case LEVELS.DEBUG:
-      console.debug(prefix, ...args);
+      console.debug(prefix, ...formattedArgs);
       break;
     case LEVELS.INFO:
-      console.info(prefix, ...args);
+      console.info(prefix, ...formattedArgs);
       break;
     case LEVELS.WARN:
-      console.warn(prefix, ...args);
+      console.warn(prefix, ...formattedArgs);
       break;
     case LEVELS.ERROR:
-      console.error(prefix, ...args);
+      console.error(prefix, ...formattedArgs);
       break;
     default:
-      console.log(prefix, ...args);
+      console.log(prefix, ...formattedArgs);
   }
 }
 

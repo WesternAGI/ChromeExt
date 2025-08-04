@@ -1,8 +1,20 @@
 import { log, LEVELS } from './utils/logger.js';
 import { sendNotification } from './utils/notifier.js';
+import { getCurrentServer, SERVERS } from './utils/storage.js';
 
 // ----------------- Constants -----------------
-const API_BASE = 'https://web-production-d7d37.up.railway.app';
+let API_BASE = 'https://web-production-d7d37.up.railway.app';
+
+// Initialize the API base URL
+(async () => {
+  try {
+    const server = await getCurrentServer();
+    API_BASE = server.url;
+    log(LEVELS.INFO, 'BG', `Using server: ${server.name} (${server.url})`);
+  } catch (error) {
+    console.error('Failed to load server config:', error);
+  }
+})();
 const DEVICE_NAME = 'browser-chrome';
 const DEVICE_TYPE = 'browser';
 const HEARTBEAT_ALARM = 'deviceHeartbeat';
@@ -22,61 +34,160 @@ function getAuthToken(cb) {
 // Generate a stable device ID if it doesn't exist
 async function getOrCreateDeviceId() {
   return new Promise((resolve) => {
+    // First, try to get the device ID from storage
     chrome.storage.local.get([DEVICE_ID_KEY], (result) => {
-      if (result[DEVICE_ID_KEY]) {
-        resolve(result[DEVICE_ID_KEY]);
-      } else {
-        // Generate a new device ID as a plain UUID
-        const newDeviceId = crypto.randomUUID();
-        chrome.storage.local.set({ [DEVICE_ID_KEY]: newDeviceId }, () => {
-          log(LEVELS.INFO, 'BG', 'Generated new device ID', { deviceId: newDeviceId });
-          resolve(newDeviceId);
-        });
+      if (result && result[DEVICE_ID_KEY]) {
+        // Validate the stored device ID is a valid UUID
+        const storedId = result[DEVICE_ID_KEY].trim();
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storedId)) {
+          log(LEVELS.INFO, 'BG', 'Using existing device ID', { deviceId: storedId });
+          resolve(storedId);
+          return;
+        } else {
+          log(LEVELS.WARN, 'BG', 'Invalid device ID format in storage, generating new one', { 
+            storedId,
+            isValid: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(storedId)
+          });
+        }
       }
+      
+      // If we get here, either no device ID exists or it's invalid
+      const newDeviceId = crypto.randomUUID();
+      
+      // Store the new device ID
+      chrome.storage.local.set({ [DEVICE_ID_KEY]: newDeviceId }, () => {
+        if (chrome.runtime.lastError) {
+          log(LEVELS.ERROR, 'BG', 'Failed to store device ID', { 
+            error: chrome.runtime.lastError,
+            newDeviceId 
+          });
+          // Still resolve with the new ID even if storage failed
+          resolve(newDeviceId);
+        } else {
+          log(LEVELS.INFO, 'BG', 'Generated and stored new device ID', { 
+            deviceId: newDeviceId,
+            storedAt: new Date().toISOString()
+          });
+          resolve(newDeviceId);
+        }
+      });
     });
   });
 }
 
+// Handle server changes
+chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.type === 'SERVER_CHANGED') {
+    const { server } = request;
+    API_BASE = server.url;
+    log(LEVELS.INFO, 'BG', `Server changed to: ${server.name} (${server.url})`);
+    
+    // Re-authenticate if needed
+    if (isAuthenticated) {
+      // Clear any existing heartbeat
+      clearHeartbeat();
+      // Restart heartbeat with new server
+      scheduleHeartbeat();
+    }
+  }
+  return true; // Keep the message channel open for async response
+});
+
 // Send heartbeat to backend
 async function sendHeartbeat(details = {}) {
-  if (!isAuthenticated) return;
+  if (!isAuthenticated) {
+    log(LEVELS.INFO, 'BG', 'Skipping heartbeat - not authenticated');
+    return;
+  }
   
   try {
     const token = await new Promise(resolve => getAuthToken(resolve));
-    if (!token) return;
+    if (!token) {
+      log(LEVELS.WARN, 'BG', 'No auth token available for heartbeat');
+      return;
+    }
 
-    // Get or create device ID
+    // Get or create device ID with detailed logging
+    log(LEVELS.DEBUG, 'BG', 'Getting or creating device ID');
     const deviceId = await getOrCreateDeviceId();
     
-    const body = new URLSearchParams();
-    body.append('device_id', deviceId);
-    body.append('device_name', DEVICE_NAME);
-    body.append('device_type', DEVICE_TYPE);
-    if (details.current_app) body.append('current_app', details.current_app);
-    if (details.current_page) body.append('current_page', details.current_page);
-    if (details.current_url) body.append('current_url', details.current_url);
+    // Log the device ID being used (first 8 chars for security)
+    const deviceIdPreview = deviceId ? `${deviceId.substring(0, 8)}...` : 'none';
+    log(LEVELS.DEBUG, 'BG', 'Using device ID', { 
+      deviceIdPreview,
+      deviceIdLength: deviceId ? deviceId.length : 0,
+      isValid: deviceId && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(deviceId)
+    });
+    
+    // Prepare request body as JSON with required heartbeat_data fields:
+    // device_id, device_name, device_type, current_app, current_page, current_url
+    const payload = {
+      device_id: deviceId,
+      device_name: DEVICE_NAME,
+      device_type: DEVICE_TYPE,
+      // Add optional fields if they exist
+      ...(details.current_app && { current_app: details.current_app }),
+      ...(details.current_page && { current_page: details.current_page }),
+      ...(details.current_url && { current_url: details.current_url })
+    };
+
+    log(LEVELS.DEBUG, 'BG', 'Sending heartbeat request', { 
+      url: `${API_BASE}/device/heartbeat`,
+      hasToken: !!token,
+      payload
+    });
 
     try {
       const response = await fetch(`${API_BASE}/device/heartbeat`, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
+          'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`,
         },
-        body,
+        body: JSON.stringify(payload),
       });
 
+      const responseText = await response.text();
+      
       if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
+        throw new Error(`HTTP error! status: ${response.status}, response: ${responseText}`);
       }
       
-      return await response.json();
+      try {
+        const responseData = responseText ? JSON.parse(responseText) : {};
+        log(LEVELS.DEBUG, 'BG', 'Heartbeat successful', {
+          status: response.status,
+          response: responseData
+        });
+        // Emit heartbeat response as extension notification
+        sendNotification(
+          'Heartbeat response',
+          JSON.stringify(responseData, null, 2)
+        );
+        return responseData;
+      } catch (parseError) {
+        log(LEVELS.WARN, 'BG', 'Failed to parse heartbeat response', { 
+          status: response.status,
+          responseText,
+          error: parseError.message 
+        });
+        return { success: true }; // Consider successful if we can't parse the response
+      }
     } catch (err) {
-      log(LEVELS.ERROR, 'BG', 'Heartbeat error', err);
+      log(LEVELS.ERROR, 'BG', 'Heartbeat request failed', { 
+        error: err.message,
+        stack: err.stack,
+        url: `${API_BASE}/device/heartbeat`
+      });
       throw err; // Re-throw to allow caller to handle if needed
     }
   } catch (err) {
-    log(LEVELS.ERROR, 'BG', 'Error in sendHeartbeat', err);
+    log(LEVELS.ERROR, 'BG', 'Unexpected error in sendHeartbeat', { 
+      error: err.message,
+      stack: err.stack,
+      details: JSON.stringify(details, null, 2)
+    });
+    throw err;
   }
 }
 
@@ -119,14 +230,33 @@ function heartbeatWithActiveTab() {
 function sendLogout() {
   getAuthToken((token) => {
     if (!token) return;
-    const body = new URLSearchParams();
-    body.append('device_name', DEVICE_NAME);
+    
+    const payload = {
+      device_name: DEVICE_NAME
+    };
 
     fetch(`${API_BASE}/device/logout`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body,
-    }).catch((err) => log(LEVELS.ERROR, 'BG', 'Logout error', err));
+      headers: { 
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}` 
+      },
+      body: JSON.stringify(payload),
+    })
+    .then(response => {
+      if (!response.ok) {
+        return response.text().then(text => {
+          throw new Error(`Logout failed: ${response.status} - ${text}`);
+        });
+      }
+      return response.json();
+    })
+    .catch((err) => {
+      log(LEVELS.ERROR, 'BG', 'Logout error', {
+        error: err.message,
+        stack: err.stack
+      });
+    });
   });
 }
 

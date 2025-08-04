@@ -1,16 +1,21 @@
 {
-  "name": "Thoth Site Notifier",
-  "description": "Sends a Chrome notification when a new website is opened, with detailed logging.",
+  "name": "Thoth",
+  "description": "Thoth Chrome Extension",
   "version": "1.0.0",
   "manifest_version": 3,
   "permissions": [
+    "activeTab",
     "tabs",
-    "notifications",
     "storage",
-    "alarms"
+    "alarms",
+    "notifications",
+    "contextMenus",
+    "scripting"
   ],
   "host_permissions": [
-    "https://web-production-d7d37.up.railway.app/*"
+    "https://*/*",
+    "http://*/*",
+    "<all_urls>"
   ],
   "background": {
     "service_worker": "background.js",
@@ -22,7 +27,14 @@
     "128": "icons/icon128.png"
   },
   "action": {
-    "default_title": "Thoth Notifier",
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
   }
 }
