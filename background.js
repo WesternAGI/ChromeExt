@@ -160,10 +160,10 @@ async function sendHeartbeat(details = {}) {
           response: responseData
         });
         // Emit heartbeat response as extension notification
-        sendNotification(
-          'Heartbeat response',
-          JSON.stringify(responseData, null, 2)
-        );
+        // sendNotification(
+        //   'Heartbeat response',
+        //   JSON.stringify(responseData, null, 2)
+        // );
         return responseData;
       } catch (parseError) {
         log(LEVELS.WARN, 'BG', 'Failed to parse heartbeat response', { 
@@ -372,15 +372,81 @@ function processTabUpdate(tabId, tab) {
     // Update last notified URL
     lastURLMap.set(tabId, currentURL);
 
-    // Send the notification
-    sendNotification(tab.title || 'New Page', currentURL);
-
     // Heartbeat with current URL
     sendHeartbeat({
       current_app: 'chrome',
       current_page: tab.title,
       current_url: currentURL,
     });
+
+    // Also capture page content and send details to backend for AI processing
+    try {
+      chrome.scripting.executeScript(
+        {
+          target: { tabId },
+          func: () => {
+            try {
+              const title = document.title || '';
+              const url = location.href || '';
+              const content = document.body ? document.body.innerText || '' : '';
+              return { title, url, content };
+            } catch (e) {
+              return { title: document.title || '', url: location.href || '', content: '' };
+            }
+          },
+        },
+        async (results) => {
+          if (chrome.runtime.lastError) {
+            log(LEVELS.ERROR, 'BG', 'executeScript error', chrome.runtime.lastError);
+            return;
+          }
+          const result = (results && results[0] && results[0].result) || null;
+          if (!result) return;
+
+          // Limit content size to avoid large payloads
+          const maxLen = 8000;
+          const payload = {
+            title: result.title || (tab.title || ''),
+            url: result.url || currentURL,
+            content: (result.content || '').slice(0, maxLen),
+          };
+
+          try {
+            const [token, deviceId] = await Promise.all([
+              new Promise(resolve => getAuthToken(resolve)),
+              getOrCreateDeviceId(),
+            ]);
+            if (!token || !deviceId) return;
+            const resp = await fetch(`${API_BASE}/active`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                device: deviceId,
+                title: payload.title,
+                url: payload.url,
+                content: payload.content,
+              }),
+            });
+            // Handle backend hint to show a notification
+            try {
+              const data = await resp.json();
+              if (data && data.show_notification && data.response && typeof data.response === 'string' && data.response.trim()) {
+                sendNotification('Thoth', data.response.trim());
+              }
+            } catch (parseErr) {
+              log(LEVELS.WARN, 'BG', 'Failed to parse /active response', { error: parseErr?.message });
+            }
+          } catch (e) {
+            log(LEVELS.ERROR, 'BG', 'Failed to send page details', { error: e?.message });
+          }
+        }
+      );
+    } catch (e) {
+      log(LEVELS.ERROR, 'BG', 'Failed to capture page content', { error: e?.message });
+    }
   } else {
     log(LEVELS.DEBUG, 'BG', 'URL unchanged – no notification', { tabId, currentURL });
   }
