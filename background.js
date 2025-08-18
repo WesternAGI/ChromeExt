@@ -21,6 +21,7 @@ const HEARTBEAT_ALARM = 'deviceHeartbeat';
 const HEARTBEAT_INTERVAL_MS = 1000; // 1 second heartbeat when service worker is awake
 const DEVICE_ID_KEY = 'device_id';
 let heartbeatIntervalId = null; // stores setInterval id
+let isWindowFocused = true; // track Chrome window focus state
 
 // Authentication state
 const AUTH_TOKEN_KEY = 'authToken';
@@ -128,7 +129,8 @@ async function sendHeartbeat(details = {}) {
       // Add optional fields if they exist
       ...(details.current_app && { current_app: details.current_app }),
       ...(details.current_page && { current_page: details.current_page }),
-      ...(details.current_url && { current_url: details.current_url })
+      ...(details.current_url && { current_url: details.current_url }),
+      ...(typeof details.focused === 'boolean' && { focused: details.focused })
     };
 
     log(LEVELS.DEBUG, 'BG', 'Sending heartbeat request', { 
@@ -212,7 +214,7 @@ function heartbeatWithActiveTab() {
     const titlesStr = titles.join(' | ');
     const current_app = `chrome|tabs:${tabCount}|titles:${titlesStr}`;
 
-    const details = { current_app };
+    const details = { current_app, focused: isWindowFocused };
     if (activeTab) {
       details.current_page = activeTab.title;
       details.current_url = activeTab.url;
@@ -377,6 +379,7 @@ function processTabUpdate(tabId, tab) {
       current_app: 'chrome',
       current_page: tab.title,
       current_url: currentURL,
+      focused: isWindowFocused,
     });
 
     // Also capture page content and send details to backend for AI processing
@@ -428,6 +431,7 @@ function processTabUpdate(tabId, tab) {
                 title: payload.title,
                 url: payload.url,
                 content: payload.content,
+                focused: isWindowFocused,
               }),
             });
             // Handle backend hint to show a notification
@@ -471,4 +475,33 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === HEARTBEAT_ALARM) {
     heartbeatWithActiveTab();
   }
+});
+
+// Track Chrome window focus/blur and notify backend quickly
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  // When focus goes to another app, Chrome reports WINDOW_ID_NONE
+  isWindowFocused = windowId !== chrome.windows.WINDOW_ID_NONE;
+  log(LEVELS.INFO, 'BG', 'Window focus changed', { isWindowFocused, windowId });
+  // Send a lightweight heartbeat immediately with updated focus state
+  sendHeartbeat({ current_app: 'chrome', focused: isWindowFocused }).catch(() => {});
+  // Also notify /active immediately with minimal payload to suppress AI/SMS promptly
+  (async () => {
+    try {
+      const [token, deviceId] = await Promise.all([
+        new Promise(resolve => getAuthToken(resolve)),
+        getOrCreateDeviceId(),
+      ]);
+      if (!token || !deviceId) return;
+      await fetch(`${API_BASE}/active`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ device: deviceId, focused: isWindowFocused }),
+      });
+    } catch (e) {
+      // best effort; ignore
+    }
+  })();
 });
